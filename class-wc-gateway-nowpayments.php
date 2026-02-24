@@ -5,7 +5,7 @@
  * Plugin Name:             nowpayments.io Gateway for WooCommerce
  * Plugin URI:              https://www.nowpayments.io/
  * Description:             Cryptocurrency Payment Gateway.
- * Version:                 1.6.4
+ * Version:                 1.7.0
  * Author:                  nowpayments.io
  * Author URI:              https://www.nowpayments.io/
  * License:                 proprietary
@@ -13,9 +13,9 @@
  * Text Domain:             wc-nowpayments-gateway
  * Domain Path:             /i18n/languages/
  * Requires at least:       5.5
- * Tested up to:            5.9
+ * Tested up to:            5.9.3
  * WC requires at least:    4.9.4
- * WC tested up to:         6.1.1
+ * WC tested up to:         6.9.4
  *
  */
 
@@ -28,8 +28,8 @@ if (!defined('ABSPATH'))
 }
 
 if (version_compare(phpversion(), '7.1', '>=')) {
-    ini_set('precision', 10);
-    ini_set('serialize_precision', 10);
+    ini_set('precision', 14);
+    ini_set('serialize_precision', 14);
 }
 
 
@@ -41,7 +41,7 @@ if (!defined('NOWPAYMENTS_FOR_WOOCOMMERCE_ASSET_URL')) {
     define('NOWPAYMENTS_FOR_WOOCOMMERCE_ASSET_URL', plugin_dir_url(__FILE__));
 }
 if (!defined('VERSION_PFW')) {
-    define('VERSION_PFW', '1.6.4');
+    define('VERSION_PFW', '1.7.0');
 }
 
 
@@ -148,6 +148,7 @@ function wc_nowpayments_gateway_init()
             $this->form_submission_method = $this->get_option('form_submission_method') == 'yes' ? true : false;
             $this->invoice_prefix = $this->get_option('invoice_prefix', 'WC-');
             $this->simple_total = $this->get_option('simple_total') == 'yes' ? true : false;
+            $this->use_invoices = $this->get_option('use_invoices') == 'yes' ? true : false;
 
             // Logs
             $this->log = new WC_Logger();
@@ -175,6 +176,26 @@ function wc_nowpayments_gateway_init()
         function init_form_fields()
         {
             require_once( 'includes/setting_form_fields.php' );
+        }
+
+        private function does_not_end_with_number($string) {
+            $this->log('does_not_end_with_number:'.$string);
+            return !preg_match('/\d$/', $string);
+        }
+
+        private function extract_ending_number($string) {
+            if (preg_match('/(\d+)$/', $string, $matches)) {
+                return $matches[1];
+            }
+            return null;
+        }
+
+        public function validate_invoice_prefix_field( $key, $value ) {
+            if ( isset( $value ) && !$this->does_not_end_with_number($value)) {
+                WC_Admin_Settings::add_error( esc_html__( 'Invoice prefix must not end with a digit.', 'wc-nowpayments-gateway'));
+            }
+
+            return $value;
         }
 
 
@@ -216,6 +237,12 @@ function wc_nowpayments_gateway_init()
 
         }
 
+        private function log($message) {
+            // for debug purposes
+            // file_put_contents('log.log', $message . "\n", FILE_APPEND);
+            return true;
+        }
+
 		/**
 		 * Add content to the WC emails.
 		 *
@@ -231,6 +258,58 @@ function wc_nowpayments_gateway_init()
 			}
 		}
 
+        /**
+         * Generate invoice url
+         *
+         * @access public
+         * @param int $order_id
+         * @return string
+         */
+        public function generate_invoice_url($order)
+        {
+            global $woocommerce;
+
+            $url = 'https://api.nowpayments.io/v1/invoice';
+            $data = $this->get_np_invoice_args($order);
+            $content = json_encode($data);
+
+            $this->log($content);
+
+            $curl = curl_init($url);
+            curl_setopt($curl, CURLOPT_HEADER, false);
+            curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($curl, CURLOPT_HTTPHEADER,
+                    ["Content-type: application/json", "X-Api-Key: ". $this->api_key]
+            );
+            curl_setopt($curl, CURLOPT_POST, true);
+            curl_setopt($curl, CURLOPT_POSTFIELDS, $content);
+
+            $json_response = curl_exec($curl);
+
+            $this->log($json_response);
+
+            $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+
+            $this->log('status:'.$status);
+
+            if ( $status != 201 && $status != 200 ) {
+                die("Error: call to URL $url failed with status $status, response $json_response, curl_error " . curl_error($curl) . ", curl_errno " . curl_errno($curl));
+            }
+
+
+            curl_close($curl);
+
+            $data = json_decode($json_response, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                $this->log('JSON decode error: ' . json_last_error_msg());
+            }
+
+            $this->log($data['invoice_url']);
+
+            return $data['invoice_url'];
+        }
+
 
         /**
          * Process the payment and return the result
@@ -242,7 +321,12 @@ function wc_nowpayments_gateway_init()
         function process_payment($order_id)
         {
             $order = wc_get_order($order_id);
-            $redirect_url= $this->generate_nowpayments_url($order);
+            if ($this->use_invoices) {
+                $redirect_url = $this->generate_invoice_url($order);
+            } else {
+                $redirect_url= $this->generate_nowpayments_url($order);
+            }
+
             $this->debug_post_out( 'Sending_order' , $redirect_url );
             return [
                 'result' => 'success',
@@ -339,6 +423,76 @@ function wc_nowpayments_gateway_init()
             return $nowpayments_args;
         }
 
+        /**
+         * Get nowpayments.io invoice params
+         *
+         * @access public
+         * @param mixed $order
+         * @return array
+         */
+        function get_np_invoice_args($order)
+        {
+            global $woocommerce;
+
+            $order_id = $order->id;
+
+            if (in_array($order->billing_country, ['US', 'CA'])) {
+                $order->billing_phone = str_replace(['( ', '-', ' ', ' )', '.'], '', $order->billing_phone);
+            }
+
+            $php_version = phpversion();
+            $wp_version = get_bloginfo('version');
+
+            if (class_exists('WooCommerce')) {
+                $wc_version = WC()->version;
+            } else {
+                $wc_version = 'null';
+            }
+
+            // nowpayments.io Args
+            $invoice_args = [
+                // Get the currency from the order, not the active currency
+                // NOTE: for backward compatibility with WC 2.6 and earlier,
+                // $order->get_order_currency() should be used instead
+                'source' => "woocommerce_" . "php" .$php_version . "_wp" . $wp_version . "_wc" . $wc_version,
+                'ipn_callback_url' => $this->ipn_url,
+                'price_currency' => $order->get_currency(),
+                'success_url' => $this->get_return_url($order),
+                'cancel_url' => esc_url_raw($order->get_cancel_order_url_raw()),
+
+                // Order key + ID
+                'order_id' => $this->invoice_prefix . $order->get_order_number(),
+                'order_description' => $order->billing_first_name . '-' . $order->billing_email,
+                'price_amount' => number_format($order->get_total(), 8, '.', '')
+            ];
+
+            $description = [
+              'customerName' => $order->billing_first_name,
+              'customerEmail' => $order->billing_email,
+            ];
+
+            if ($this->simple_total) {
+                $description['tax'] = 0.00;
+                $description['shipping'] = 0.00;
+            } else if (wc_tax_enabled() && wc_prices_include_tax()) {
+                $description['shipping'] = number_format($order->get_total_shipping() + $order->get_shipping_tax(), 8, '.', '');
+                $description['tax'] = 0.00;
+            } else {
+                $description['shipping'] = number_format($order->get_total_shipping(), 8, '.', '');
+                $description['tax'] = $order->get_total_tax();
+            }
+            $order_cur = wc_get_order($order_id);
+            $items_cur = $order_cur->get_items();
+            $items = [];
+            foreach ($items_cur as $item_id => $item) {
+                $items[] = $item->get_data();
+            }
+            $invoice_args['order_description'] = json_encode($description);
+            $invoice_args = apply_filters('woocommerce_nowpayments_args', $invoice_args);
+
+            return $invoice_args;
+        }
+
 
 
         /**
@@ -385,6 +539,47 @@ function wc_nowpayments_gateway_init()
 
         }
 
+        function get_np_ipn_signature() {
+            $this->log('$_SERVER:'.print_r($_SERVER, true));
+
+            if (isset($_SERVER['HTTP_X_NOWPAYMENTS_SIG']) && !empty($_SERVER['HTTP_X_NOWPAYMENTS_SIG'])) {
+                return trim($_SERVER['HTTP_X_NOWPAYMENTS_SIG']);
+            }
+
+            $all_headers = getallheaders();
+            $this->log('$all_headers:'.print_r($all_headers, true));
+
+            foreach ($all_headers as $key => $value) {
+                $this->log('header:'."$key - $value");
+                if (strtoupper($key) == 'X_NOWPAYMENTS_SIG') {
+                    return trim($value);
+                }
+            }
+            return false;
+        }
+
+        private function lookup_order($np_order_id) {
+            $this->log('lookup_order:'. $np_order_id);
+            $valid_order_id = str_replace($this->invoice_prefix, "", $np_order_id);
+            $this->log('valid_order_id:'. $valid_order_id);
+            $order = new WC_Order($valid_order_id);
+
+            if ($order !== false) {
+                return $order;
+            }
+
+            // try parse valid order id once again
+            $valid_order_id = $this->extract_ending_number($np_order_id);
+            $this->log('after extract_ending_number:'. $valid_order_id);
+            $order = new WC_Order($valid_order_id);
+
+            if ($order !== false) {
+                return $order;
+            }
+            $this->log('order not found:');
+            return false;
+        }
+
 
         /**
          * Check Nowpayments.io IPN validity
@@ -399,20 +594,23 @@ function wc_nowpayments_gateway_init()
             $auth_ok = false;
             $request_data = null;
 
+            $received_hmac = $this->get_np_ipn_signature();
 
-            if (isset($_SERVER['HTTP_X_NOWPAYMENTS_SIG']) && !empty($_SERVER['HTTP_X_NOWPAYMENTS_SIG'])) {
-                $recived_hmac = $_SERVER['HTTP_X_NOWPAYMENTS_SIG'];
+            $this->log('$received_hmac:'.$received_hmac);
 
+            if ($received_hmac != false && $received_hmac !== '') {
                 $request_json = file_get_contents('php://input');
+                $this->log('$request_json:'.$request_json);
                 $request_data = json_decode($request_json, true);
+                $this->log('$request_data:'.print_r($request_data, true));
                 ksort($request_data);
                 $sorted_request_json = json_encode($request_data);
-
+                $this->log('$sorted_request_json:'.print_r($sorted_request_json, true));
 
                 if ($request_json !== false && !empty($request_json)) {
                     $hmac = hash_hmac("sha512", $sorted_request_json, trim($this->ipn_secret));
-
-                    if ($hmac == $recived_hmac) {
+                    $this->log('$calculated hmac:'.$hmac);
+                    if ($hmac == $received_hmac) {
                         $auth_ok = true;
                     } else {
                         $error_msg = 'HMAC signature does not match';
@@ -425,8 +623,7 @@ function wc_nowpayments_gateway_init()
             }
 
             if ($auth_ok) {
-                $valid_order_id = str_replace("WC-", "", $request_data["order_id"]);
-                $order = new WC_Order($valid_order_id);
+                $order = $this->lookup_order($request_data["order_id"]);
 
                 if ($order !== false) {
                     // Get the currency from the order, not the active currency
@@ -499,9 +696,14 @@ function wc_nowpayments_gateway_init()
 
             $request_json = file_get_contents('php://input');
             $request_data = json_decode($request_json, true);
-            $valid_order_id = str_replace("WC-", "", $request_data["order_id"]);
-            $order = new WC_Order($valid_order_id);
+            $order = $this->lookup_order($request_data["order_id"]);
 
+            $order_status = $order->get_status();
+
+            if($order_status == 'completed') {
+                $order->add_order_note('Cannot update complited order. nowpayments.io status: '.$request_data["payment_status"]);
+                return false;
+            }
 
             if ($request_data["payment_status"] == "finished") {
                 $this->debug_post_out( 'update_status' , 'processing :Order has been paid.');
@@ -509,7 +711,7 @@ function wc_nowpayments_gateway_init()
             } else if ($request_data["payment_status"] == "partially_paid") {
                 $order->update_status('on-hold', 'Order is holded.');
                 $this->debug_post_out( 'update_status' , 'on-hold: Order is holded.');
-                $order->add_order_note('Your payment is partially paid. Please contact support@nowpayments.io Amount received: ' . $request_data["actually_paid"]);
+                $order->add_order_note('Your payment is partially paid. Please contact support@nowpayments.io Amount received: ' . $request_data["actually_paid"] . " " . $request_data["pay_currency"]);
             } else if ($request_data["payment_status"] == "confirming") {
                 $order->update_status('processing', 'Order is processing.');
                 $this->debug_post_out( 'update_status' , 'processing:Order is processing.');
