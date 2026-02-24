@@ -117,6 +117,83 @@ function wc_nowpayments_gateway_init()
         var $ipn_url;
 
         /**
+         * Instructions.
+         *
+         * @var string $instructions
+         */
+        protected $instructions;
+
+        /**
+         * IPN Secret.
+         *
+         * @var string $ipn_secret
+         */
+        protected $ipn_secret;
+
+        /**
+         * API Key.
+         *
+         * @var string $api_key
+         */
+        protected $api_key;
+
+        /**
+         * Debug Email.
+         *
+         * @var string $debug_email
+         */
+        protected $debug_email;
+
+        /**
+         * Debug post url.
+         *
+         * @var string $debug_post_url
+         */
+        protected $debug_post_url;
+
+        /**
+         * Allow zero confirm.
+         *
+         * @var bool $allow_zero_confirm
+         */
+        protected $allow_zero_confirm;
+
+        /**
+         * Form submission method.
+         *
+         * @var bool $form_submission_method
+         */
+        protected $form_submission_method;
+
+        /**
+         * Invoice prefix.
+         *
+         * @var string $invoice_prefix
+         */
+        protected $invoice_prefix;
+
+        /**
+         * Simple total.
+         *
+         * @var bool $simple_total
+         */
+        protected $simple_total;
+
+        /**
+         * Use Invoices.
+         *
+         * @var bool $use_invoices
+         */
+        protected $use_invoices;
+
+        /**
+         * Log instance.
+         *
+         * @var WC_Logger $log
+         */
+        protected $log;
+
+        /**
          * Constructor for the gateway.
          *
          * @access public
